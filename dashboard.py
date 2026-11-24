@@ -40,7 +40,6 @@ h1{font-size:21px;margin:0;font-weight:650}.sub{color:var(--muted);font-size:12p
 <section class="panel"><div class="panel-head"><h2>Arbitrage opportunities</h2><span id="threshold">Gross edge · before account fees not configured here</span></div>
 <div class="table-wrap"><table><thead><tr><th>Matchup</th><th>Outcomes / execution legs</th><th>Payout</th><th>Total cost</th><th>Est. profit</th><th>Gross edge</th></tr></thead><tbody id="opportunity-rows"><tr><td colspan="6" class="empty">Waiting for tracker data…</td></tr></tbody></table></div></section>
 <section class="panel"><div class="panel-head"><h2>Data feed status</h2><span id="snapshot-counts">—</span></div><div class="table-wrap"><table><thead><tr><th>Source</th><th>Price levels</th><th>Missing books / errors</th></tr></thead><tbody id="venue-rows"><tr><td colspan="3" class="empty">Waiting for tracker data…</td></tr></tbody></table></div></section>
-<div class="foot">Auto-refreshes from local output files every 1.5 seconds. A quote or displayed opportunity is not a guaranteed fill; verify prices and settlement rules before trading.</div>
 </main><script>
 const $=id=>document.getElementById(id);const money=n=>Number.isFinite(+n)?'$'+(+n).toFixed(2):'—';
 const pct=n=>Number.isFinite(+n)?(+n).toFixed(2)+'%':'—';
