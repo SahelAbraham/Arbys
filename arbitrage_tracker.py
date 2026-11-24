@@ -22,6 +22,7 @@ import os
 import sqlite3
 import sys
 import time
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -32,9 +33,24 @@ import requests
 
 try:
     from dotenv import load_dotenv
-    load_dotenv("secrets.txt")
+    load_dotenv()
 except ImportError:
     pass
+
+# Explicitly load the existing secrets file.
+from pathlib import Path
+
+secrets_file = Path(__file__).resolve().parent / "secrets.txt"
+if secrets_file.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(secrets_file, override=False)
+    except ImportError:
+        for line in secrets_file.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 LOG = logging.getLogger("arb_tracker")
 VENUES = ("kalshi", "polymarket", "prophetx")
@@ -132,7 +148,11 @@ class Level:
 class Store:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(path)
+        # run_once() executes in asyncio.to_thread(), so this connection is
+        # intentionally shared across the main thread and the worker thread.
+        # All access is serialized by _lock below.
+        self._lock = threading.RLock()
+        self.db = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS price_levels (
@@ -152,16 +172,23 @@ class Store:
         self.db.commit()
 
     def save_snapshot(self, rows: list[dict], opportunities: list[dict]):
-        with self.db:
-            self.db.executemany("""INSERT INTO price_levels VALUES
-              (:ts,:game_key,:market_key,:selection,:venue,:instrument_id,:market_id,
-               :cost_per_payout,:payout_capacity,:raw_price,:raw_quantity,:label)""", rows)
-            self.db.executemany("""INSERT INTO opportunities VALUES
-              (:ts,:game_key,:market_key,:outcomes,:payout_size,:total_cost,
-               :gross_profit,:gross_edge,:legs_json)""", opportunities)
+        # Keep the transaction atomic and prevent concurrent access to the
+        # shared SQLite connection. The tracker has one polling worker today;
+        # the lock also protects future callers and orderly shutdown.
+        with self._lock:
+            with self.db:
+                if rows:
+                    self.db.executemany("""INSERT INTO price_levels VALUES
+                      (:ts,:game_key,:market_key,:selection,:venue,:instrument_id,:market_id,
+                       :cost_per_payout,:payout_capacity,:raw_price,:raw_quantity,:label)""", rows)
+                if opportunities:
+                    self.db.executemany("""INSERT INTO opportunities VALUES
+                      (:ts,:game_key,:market_key,:outcomes,:payout_size,:total_cost,
+                       :gross_profit,:gross_edge,:legs_json)""", opportunities)
 
     def close(self):
-        self.db.close()
+        with self._lock:
+            self.db.close()
 
 
 class Api:
@@ -201,26 +228,28 @@ class Api:
 
     def kalshi_books(self, tickers: list[str]) -> dict[str, dict]:
         out = {}
+
         if not tickers:
             return out
-        # API accepts comma-separated tickers; chunk conservatively.
+
         for i in range(0, len(tickers), 100):
             chunk = tickers[i:i + 100]
-            data = self.get(f"{KALSHI_BASE}/markets/orderbooks", params={"tickers": ",".join(chunk)})
-            books = data.get("orderbooks") or data.get("orderbook") or []
-            if isinstance(books, dict):
-                for ticker, book in books.items():
-                    out[str(ticker)] = book
-            elif isinstance(books, list):
-                for book in books:
-                    ticker = book.get("ticker") or book.get("market_ticker")
-                    if ticker:
-                        out[str(ticker)] = book
-            # Some API responses wrap individual orderbooks under markets.
-            for book in data.get("markets", []) if isinstance(data.get("markets"), list) else []:
-                ticker = book.get("ticker") or book.get("market_ticker")
+
+            # Kalshi expects repeated tickers parameters
+            params = [("tickers", ticker) for ticker in chunk]
+
+            data = self.get(
+                f"{KALSHI_BASE}/markets/orderbooks",
+                params=params
+            )
+
+            books = data.get("orderbooks") or []
+
+            for book in books:
+                ticker = book.get("ticker")
                 if ticker:
-                    out[str(ticker)] = book.get("orderbook", book)
+                    out[ticker] = book
+
         return out
 
     def poly_books(self, token_ids: list[str]) -> dict[str, dict]:
